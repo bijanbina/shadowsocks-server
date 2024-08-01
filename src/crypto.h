@@ -47,6 +47,7 @@ typedef mbedtls_cipher_context_t cipher_evp_t;
 typedef mbedtls_md_info_t digest_type_t;
 #define MAX_KEY_LENGTH 64
 #define MAX_NONCE_LENGTH 32
+#define SS_DEBUG
 #define MAX_MD_SIZE MBEDTLS_MD_MAX_SIZE
 /* we must have MBEDTLS_CIPHER_MODE_CFB defined */
 #if !defined(MBEDTLS_CIPHER_MODE_CFB)

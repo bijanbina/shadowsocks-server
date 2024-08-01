@@ -1,25 +1,3 @@
-/*
- * server.c - Provide shadowsocks service
- *
- * Copyright (C) 2013 - 2019, Max Lv <max.c.lv@gmail.com>
- *
- * This file is part of the shadowsocks-libev.
- *
- * shadowsocks-libev is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 3 of the License, or
- * (at your option) any later version.
- *
- * shadowsocks-libev is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with shadowsocks-libev; see the file COPYING. If not, see
- * <http://www.gnu.org/licenses/>.
- */
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -35,87 +13,23 @@
 #include <unistd.h>
 #include <getopt.h>
 #include <math.h>
-#ifndef __MINGW32__
 #include <netdb.h>
 #include <errno.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <sys/un.h>
-#endif
 #include <libcork/core.h>
-
-#if defined(HAVE_SYS_IOCTL_H) && defined(HAVE_NET_IF_H) && defined(__linux__)
-#include <net/if.h>
-#include <sys/ioctl.h>
-#define SET_INTERFACE
-#endif
-
-#ifdef USE_NFTABLES
-#include <ctype.h>
-#include <linux/netfilter.h>
-#include <linux/netfilter/nf_tables.h>
-#include <libmnl/libmnl.h>
-#include <libnftnl/set.h>
-/* the datatypes enum is picked from libnftables/datatype.h
-   to avoid to depend libnftables */
-enum datatypes {
-    TYPE_IPADDR = 7,
-    TYPE_IP6ADDR
-};
-#endif
 
 #include "netutils.h"
 #include "utils.h"
-#include "acl.h"
-#include "plugin.h"
-#include "server.h"
-#include "winsock.h"
+#include "server.h" 
+#include "winsock.h" 
 #include "resolv.h"
-
-#ifndef EAGAIN
-#define EAGAIN EWOULDBLOCK
-#endif
-
-#ifndef EWOULDBLOCK
-#define EWOULDBLOCK EAGAIN
-#endif
 
 #ifndef SSMAXCONN
 #define SSMAXCONN 1024
 #endif
-
-#ifdef USE_NFCONNTRACK_TOS
-
-#ifndef MARK_MAX_PACKET
-#define MARK_MAX_PACKET 10
-#endif
-
-#ifndef MARK_MASK_PREFIX
-#define MARK_MASK_PREFIX 0xDC00
-#endif
-
-#endif
-
-static void signal_cb(EV_P_ ev_signal *w, int revents);
-static void accept_cb(EV_P_ ev_io *w, int revents);
-static void server_send_cb(EV_P_ ev_io *w, int revents);
-static void server_recv_cb(EV_P_ ev_io *w, int revents);
-static void remote_recv_cb(EV_P_ ev_io *w, int revents);
-static void remote_send_cb(EV_P_ ev_io *w, int revents);
-static void server_timeout_cb(EV_P_ ev_timer *watcher, int revents);
-
-static remote_t *new_remote(int fd);
-static server_t *new_server(int fd, listen_ctx_t *listener);
-static remote_t *connect_to_remote(EV_P_ struct addrinfo *res,
-                                   server_t *server);
-
-static void free_remote(remote_t *remote);
-static void close_and_free_remote(EV_P_ remote_t *remote);
-static void free_server(server_t *server);
-static void close_and_free_server(EV_P_ server_t *server);
-static void resolv_cb(struct sockaddr *addr, void *data);
-static void resolv_free_cb(void *data);
 
 int verbose    = 0;
 int reuse_port = 0;
@@ -130,122 +44,26 @@ struct sockaddr_storage local_addr_v6;
 
 static crypto_t *crypto;
 
-static int acl       = 0;
 static int mode      = TCP_ONLY;
 static int ipv6first = 0;
 int fast_open        = 0;
 static int no_delay  = 0;
 static int ret_val   = 0;
 
-#ifdef HAVE_SETRLIMIT
-static int nofile = 0;
-#endif
 static int remote_conn = 0;
 static int server_conn = 0;
 
-static char *plugin       = NULL;
 static char *remote_port  = NULL;
-static char *manager_addr = NULL;
 uint64_t tx               = 0;
 uint64_t rx               = 0;
 
-#ifndef __MINGW32__
 ev_timer stat_update_watcher;
-#endif
 
 static struct ev_signal sigint_watcher;
 static struct ev_signal sigterm_watcher;
-#ifndef __MINGW32__
 static struct ev_signal sigchld_watcher;
-#else
-static struct plugin_watcher_t {
-    ev_io io;
-    SOCKET fd;
-    uint16_t port;
-    int valid;
-} plugin_watcher;
-#endif
 
 static struct cork_dllist connections;
-
-#ifndef __MINGW32__
-static void
-stat_update_cb(EV_P_ ev_timer *watcher, int revents)
-{
-    struct sockaddr_un svaddr, claddr;
-    int sfd = -1;
-    size_t msgLen;
-    char resp[SOCKET_BUF_SIZE];
-
-    if (verbose) {
-        LOGI("update traffic stat: tx: %" PRIu64 " rx: %" PRIu64 "", tx, rx);
-    }
-
-    snprintf(resp, SOCKET_BUF_SIZE, "stat: {\"%s\":%" PRIu64 "}", remote_port, tx + rx);
-    msgLen = strlen(resp) + 1;
-
-    ss_addr_t ip_addr = { .host = NULL, .port = NULL };
-    parse_addr(manager_addr, &ip_addr);
-
-    if (ip_addr.host == NULL || ip_addr.port == NULL) {
-        sfd = socket(AF_UNIX, SOCK_DGRAM, 0);
-        if (sfd == -1) {
-            ERROR("stat_socket");
-            return;
-        }
-
-        memset(&claddr, 0, sizeof(struct sockaddr_un));
-        claddr.sun_family = AF_UNIX;
-        snprintf(claddr.sun_path, sizeof(claddr.sun_path), "/tmp/shadowsocks.%s", remote_port);
-
-        unlink(claddr.sun_path);
-
-        if (bind(sfd, (struct sockaddr *)&claddr, sizeof(struct sockaddr_un)) == -1) {
-            ERROR("stat_bind");
-            close(sfd);
-            return;
-        }
-
-        memset(&svaddr, 0, sizeof(struct sockaddr_un));
-        svaddr.sun_family = AF_UNIX;
-        strncpy(svaddr.sun_path, manager_addr, sizeof(svaddr.sun_path) - 1);
-
-        if (sendto(sfd, resp, strlen(resp) + 1, 0, (struct sockaddr *)&svaddr,
-                   sizeof(struct sockaddr_un)) != msgLen) {
-            ERROR("stat_sendto");
-            close(sfd);
-            return;
-        }
-
-        unlink(claddr.sun_path);
-    } else {
-        struct sockaddr_storage storage;
-        memset(&storage, 0, sizeof(struct sockaddr_storage));
-        if (get_sockaddr(ip_addr.host, ip_addr.port, &storage, 0, ipv6first) == -1) {
-            ERROR("failed to parse the manager addr");
-            return;
-        }
-
-        sfd = socket(storage.ss_family, SOCK_DGRAM, 0);
-
-        if (sfd == -1) {
-            ERROR("stat_socket");
-            return;
-        }
-
-        size_t addr_len = get_sockaddr_len((struct sockaddr *)&storage);
-        if (sendto(sfd, resp, strlen(resp) + 1, 0, (struct sockaddr *)&storage,
-                   addr_len) != msgLen) {
-            ERROR("stat_sendto");
-            close(sfd);
-            return;
-        }
-    }
-
-    close(sfd);
-}
-
-#endif
 
 static void
 free_connections(struct ev_loop *loop)

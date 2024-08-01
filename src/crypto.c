@@ -163,8 +163,8 @@ crypto_init(const char *password, const char *key, const char *method)
             crypto_t *crypto = (crypto_t *)ss_malloc(sizeof(crypto_t));
             crypto_t tmp     = {
                 .cipher      = cipher,
-                .encrypt_all = &stream_encrypt_all,
-                .decrypt_all = &stream_decrypt_all,
+                .encrypt_all = NULL,
+                .decrypt_all = NULL,
                 .encrypt     = &stream_encrypt,
                 .decrypt     = &stream_decrypt,
                 .ctx_init    = &stream_ctx_init,
