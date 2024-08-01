@@ -77,282 +77,16 @@ free_connections(struct ev_loop *loop)
     }
 }
 
-static char *
-get_peer_name(int fd)
-{
-    static char peer_name[INET6_ADDRSTRLEN] = { 0 };
-    struct sockaddr_storage addr;
-    socklen_t len = sizeof(struct sockaddr_storage);
-    memset(&addr, 0, len);
-    memset(peer_name, 0, INET6_ADDRSTRLEN);
-    int err = getpeername(fd, (struct sockaddr *)&addr, &len);
-    if (err == 0) {
-        if (addr.ss_family == AF_INET) {
-            struct sockaddr_in *s = (struct sockaddr_in *)&addr;
-            inet_ntop(AF_INET, &s->sin_addr, peer_name, INET_ADDRSTRLEN);
-        } else if (addr.ss_family == AF_INET6) {
-            struct sockaddr_in6 *s = (struct sockaddr_in6 *)&addr;
-            inet_ntop(AF_INET6, &s->sin6_addr, peer_name, INET6_ADDRSTRLEN);
-        }
-    } else {
-        return NULL;
-    }
-    return peer_name;
-}
-
 static void
 stop_server(EV_P_ server_t *server)
 {
+    printf("STOPID\n");
     server->stage = STAGE_STOP;
 }
 
-#ifdef USE_NFTABLES
-struct nftbl_set_info {
-    uint32_t family;
-    char *table;
-    char *name;
-    uint32_t type;
-}* nftbl_badip_sets[16];
 
-static struct nftnl_set *
-nftbl_build_set(const char* table, const char* name, void* addr, size_t len)
-{
-    struct nftnl_set *set = nftnl_set_alloc();
-    if (set == NULL) return NULL;
-    nftnl_set_set_str(set, NFTNL_SET_TABLE, table);
-    nftnl_set_set_str(set, NFTNL_SET_NAME, name);
 
-    struct nftnl_set_elem *elem = nftnl_set_elem_alloc();
-    if (elem == NULL) {
-        nftnl_set_free(set);
-        return NULL;
-    }
-    nftnl_set_elem_set(elem, NFTNL_SET_ELEM_KEY, addr, len);
-    nftnl_set_elem_add(set, elem);
-    return set;
-}
-
-static uint32_t
-nftbl_build_nlmsg(void* buf, size_t *len, uint32_t family,
-                  struct nftnl_set *set)
-{
-    uint32_t seq = time(NULL);
-    struct nlmsghdr *nlh;
-    struct mnl_nlmsg_batch *batch = mnl_nlmsg_batch_start(buf, *len);
-    nftnl_batch_begin(mnl_nlmsg_batch_current(batch), seq);
-    mnl_nlmsg_batch_next(batch);
-    nlh = nftnl_nlmsg_build_hdr(mnl_nlmsg_batch_current(batch),
-                                NFT_MSG_NEWSETELEM, family,
-                                NLM_F_CREATE | NLM_F_EXCL | NLM_F_ACK,
-                                ++seq);
-    nftnl_set_elems_nlmsg_build_payload(nlh, set);
-    mnl_nlmsg_batch_next(batch);
-    nftnl_batch_end(mnl_nlmsg_batch_current(batch), seq + 1);
-    mnl_nlmsg_batch_next(batch);
-    *len = mnl_nlmsg_batch_size(batch);
-    mnl_nlmsg_batch_stop(batch);
-    return seq;
-}
-
-static int
-nftbl_send_request(void *request, size_t len, uint32_t seq,
-                   mnl_cb_t cb, void *data)
-{
-    struct mnl_socket *nl = mnl_socket_open(NETLINK_NETFILTER);
-    if (nl == NULL) return -1;
-
-    int ret = -1;
-    uint8_t buf[MNL_SOCKET_BUFFER_SIZE];
-    if (mnl_socket_bind(nl, 0, MNL_SOCKET_AUTOPID) == 0 &&
-        mnl_socket_sendto(nl, request, len) >= 0) {
-        uint32_t portid = mnl_socket_get_portid(nl);
-        while ((ret = mnl_socket_recvfrom(nl, buf, sizeof(buf))) > 0) {
-            ret = mnl_cb_run(buf, ret, seq, portid, cb, data);
-            if (ret != MNL_CB_OK)
-                break;
-        }
-        mnl_socket_close(nl);
-    }
-    return ret;
-}
-
-static void
-nftbl_report_addr(const struct sockaddr* addr)
-{
-    uint32_t type;
-    void* data;
-    size_t size;
-    if (addr->sa_family == AF_INET) {
-        type = TYPE_IPADDR;
-        data = &((struct sockaddr_in*)addr)->sin_addr;
-        size = sizeof(struct in_addr);
-    } else if (addr->sa_family == AF_INET6) {
-        type = TYPE_IP6ADDR;
-        data = &((struct sockaddr_in6*)addr)->sin6_addr;
-        size = sizeof(struct in6_addr);
-    } else {
-        return;
-    }
-
-    char buf[MNL_SOCKET_BUFFER_SIZE];
-    for (int i = 0; nftbl_badip_sets[i]; ++i) {
-        struct nftbl_set_info* si = nftbl_badip_sets[i];
-        struct nftnl_set *set;
-        if (si->type == type &&
-            (set = nftbl_build_set(si->table, si->name, data, size))) {
-            size_t len = sizeof(buf);
-            uint32_t seq = nftbl_build_nlmsg(buf, &len, si->family, set);
-            nftnl_set_free(set);
-            if (nftbl_send_request(buf, len, seq, NULL, NULL) < 0 &&
-                errno != EEXIST)
-                ERROR("nftbl_report_addr");
-        }
-    }
-}
-
-static int
-nftbl_check_cb(const struct nlmsghdr *nlh, void *data)
-{
-    struct nftnl_set *set = (struct nftnl_set*)data;
-    if (nftnl_set_nlmsg_parse(nlh, set) < 0)
-        return MNL_CB_ERROR;
-
-    uint32_t type = nftnl_set_get_u32(set, NFTNL_SET_KEY_TYPE);
-    if (type != TYPE_IPADDR && type != TYPE_IP6ADDR)
-        return MNL_CB_OK;
-
-    uint32_t len;
-    const char *name = nftnl_set_get_data(set, NFTNL_SET_NAME, &len);
-    for (int i = 0; nftbl_badip_sets[i]; ++i) {
-        struct nftbl_set_info* si = nftbl_badip_sets[i];
-        if (!memcmp(name, si->name, len)) {
-            name = nftnl_set_get_data(set, NFTNL_SET_TABLE, &len);
-            if (!si->table) {
-                size_t l = strlen(si->name) + 1;
-                si = realloc(si, sizeof(*si) + l + len);
-                si->name = (char*)(si + 1);
-                si->table = memcpy(si->name + l, name, len);
-                nftbl_badip_sets[i] = si;
-            } else if (memcmp(name, si->table, len)) {
-                continue;  /* table name not match */
-            }
-            si->family = nftnl_set_get_u32(set, NFTNL_SET_FAMILY);
-            si->type = type;
-        }
-    }
-    return MNL_CB_OK;
-}
-
-static int
-nftbl_check(void)
-{
-    struct nftnl_set *set = nftnl_set_alloc();
-    if (!set) return -1;
-
-    int ret;
-    char buf[MNL_SOCKET_BUFFER_SIZE];
-    uint32_t seq = time(NULL);
-    struct nlmsghdr *nlh;
-    nlh = nftnl_set_nlmsg_build_hdr(buf, NFT_MSG_GETSET, NFPROTO_UNSPEC,
-                                    NLM_F_DUMP|NLM_F_ACK, seq);
-    nftnl_set_nlmsg_build_payload(nlh, set);
-    ret = nftbl_send_request(nlh, nlh->nlmsg_len, seq, nftbl_check_cb, set);
-    nftnl_set_free(set);
-    if (ret < 0) return ret;
-
-    for (int i = 0; nftbl_badip_sets[i]; ++i) {
-        struct nftbl_set_info* si = nftbl_badip_sets[i];
-        if (si->family == NFPROTO_UNSPEC) {
-            if (si->table)
-                LOGE("set '%s' not found in table '%s'", si->name, si->table);
-            else
-                LOGE("set '%s' not found", si->name);
-            ret = -1;
-        }
-    }
-    if (ret < 0)
-        FATAL("Check nftables configuration.");
-    return ret;
-}
-
-static int
-nftbl_init(const char* set_str)
-{
-    struct nftbl_set_info* si;
-    const char *p0 = set_str, *p = p0, *d = NULL;
-    int i = 0;
-    do {
-        if (*p == ':') {
-            d = p;
-        } else if (*p == ',' || *p == '\0') {
-            size_t l = p - p0 + 1;
-            si = malloc(sizeof(*si) + l);
-            memset(si, 0, sizeof(*si));
-            si->name = memcpy(si + 1, p0, l);
-            si->name[l - 1] = '\0';
-            if (d) {
-                si->table = si->name;
-                si->name = si->table + (d - p0);
-                *(si->name++) = '\0';
-                d = NULL;
-            }
-            nftbl_badip_sets[i++] = si;
-            if (i == sizeof(nftbl_badip_sets) / sizeof(*si) - 1)
-                break;
-            while (*p && isspace(*(++p)));
-            p0 = p;
-        }
-    } while (*(p++));
-    return nftbl_check();
-}
-#endif
-
-static void
-report_addr(int fd, const char *info)
-{
-    char *peer_name;
-    peer_name = get_peer_name(fd);
-    if (peer_name != NULL) {
-        LOGE("failed to handshake with %s: %s", peer_name, info);
-    }
-
-#ifdef USE_NFTABLES
-    struct sockaddr_in6 addr;
-    socklen_t len = sizeof(struct sockaddr_in6);
-    if (!getpeername(fd, (struct sockaddr *)&addr, &len))
-        nftbl_report_addr((struct sockaddr *)&addr);
-#endif
-}
-
-int
-setfastopen(int fd)
-{
-    int s = 0;
-#ifdef TCP_FASTOPEN
-    if (fast_open) {
-#if defined(__APPLE__) || defined(__MINGW32__)
-        int opt = 1;
-#else
-        int opt = 5;
-#endif
-        s = setsockopt(fd, IPPROTO_TCP, TCP_FASTOPEN, &opt, sizeof(opt));
-
-        if (s == -1) {
-            if (errno == EPROTONOSUPPORT || errno == ENOPROTOOPT) {
-                LOGE("fast open is not supported on this platform");
-                fast_open = 0;
-            } else {
-                ERROR("setsockopt");
-            }
-        }
-    }
-#endif
-    return s;
-}
-
-#ifndef __MINGW32__
-int
-setnonblocking(int fd)
+int setnonblocking(int fd)
 {
     int flags;
     if (-1 == (flags = fcntl(fd, F_GETFL, 0))) {
@@ -361,145 +95,55 @@ setnonblocking(int fd)
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-#endif
-
-int
-create_and_bind(const char *host, const char *port, int mptcp)
+int create_and_bind(const char *host, const char *port, int mptcp)
 {
     struct addrinfo hints;
-    struct addrinfo *result, *rp, *ipv4v6bindall;
     int s, listen_sock = -1;
+    struct sockaddr_in servaddr; 
 
     memset(&hints, 0, sizeof(struct addrinfo));
-    hints.ai_family   = AF_UNSPEC;               /* Return IPv4 and IPv6 choices */
-    hints.ai_socktype = SOCK_STREAM;             /* We want a TCP socket */
+	memset(&servaddr, 0, sizeof(servaddr));
+
+    hints.ai_family   = AF_INET;       // IPv4 
+    hints.ai_socktype = SOCK_STREAM ;  // We want a UDP socket SOCK_DGRAM
     hints.ai_flags    = AI_PASSIVE | AI_ADDRCONFIG; /* For wildcard IP address */
     hints.ai_protocol = IPPROTO_TCP;
 
-    result = NULL;
+	listen_sock = socket(hints.ai_family, hints.ai_socktype, hints.ai_protocol);
+	if (listen_sock == -1) 
+	{
+		ERROR("bind");
+		FATAL("failed to create listen socket");
+    	return -1;
+	}
+        
+    // Filling server information 
+    servaddr.sin_family    = AF_INET; // IPv4 
+    servaddr.sin_addr.s_addr = INADDR_ANY; 
+    servaddr.sin_port = htons(atoi(port));
 
-    s = getaddrinfo(host, port, &hints, &result);
+	s = bind(listen_sock, (struct sockaddr *)&servaddr, sizeof(struct sockaddr_in));
+	if (s == 0)
+	{
+		/* We managed to bind successfully! */
+    	return listen_sock;
+	}
+	else
+	{
+		ERROR("bind");
+		FATAL("failed to bind address");
+		close(listen_sock);
+    	return -1;
+	}
 
-    if (s != 0) {
-        LOGE("failed to resolve server name %s", host);
-        return -1;
-    }
-
-    if (result == NULL) {
-        LOGE("Cannot bind");
-        return -1;
-    }
-
-    rp = result;
-
-    /*
-     * On Linux, with net.ipv6.bindv6only = 0 (the default), getaddrinfo(NULL) with
-     * AI_PASSIVE returns 0.0.0.0 and :: (in this order). AI_PASSIVE was meant to
-     * return a list of addresses to listen on, but it is impossible to listen on
-     * 0.0.0.0 and :: at the same time, if :: implies dualstack mode.
-     */
-    if (!host) {
-        ipv4v6bindall = result;
-
-        /* Loop over all address infos found until a IPV6 address is found. */
-        while (ipv4v6bindall) {
-            if (ipv4v6bindall->ai_family == AF_INET6) {
-                rp = ipv4v6bindall; /* Take first IPV6 address available */
-                break;
-            }
-            ipv4v6bindall = ipv4v6bindall->ai_next; /* Get next address info, if any */
-        }
-    }
-
-    for (/*rp = result*/; rp != NULL; rp = rp->ai_next) {
-        int protocol = rp->ai_protocol;
-        if (mptcp < 0) {
-            protocol = IPPROTO_MPTCP; // Enable upstream MPTCP
-        }
-        listen_sock = socket(rp->ai_family, rp->ai_socktype, protocol);
-        if (listen_sock == -1) {
-            continue;
-        }
-
-        if (rp->ai_family == AF_INET6) {
-            int opt = host ? 1 : 0;
-            setsockopt(listen_sock, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt));
-        }
-
-        int opt = 1;
-        setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-#ifdef SO_NOSIGPIPE
-        setsockopt(listen_sock, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
-#endif
-        if (reuse_port) {
-            int err = set_reuseport(listen_sock);
-            if (err == 0) {
-                LOGI("tcp port reuse enabled");
-            }
-        }
-
-        // Enable out-of-tree mptcp
-        if (mptcp == 1) {
-            int i = 0;
-            while ((mptcp = mptcp_enabled_values[i]) > 0) {
-                int err = setsockopt(listen_sock, IPPROTO_TCP, mptcp, &opt, sizeof(opt));
-                if (err != -1) {
-                    break;
-                }
-                i++;
-            }
-            if (mptcp == 0) {
-                ERROR("failed to enable out-of-tree multipath TCP");
-            }
-        }
-
-        s = bind(listen_sock, rp->ai_addr, rp->ai_addrlen);
-        if (s == 0) {
-            /* We managed to bind successfully! */
-            break;
-        } else {
-            ERROR("bind");
-            FATAL("failed to bind address");
-        }
-
-        close(listen_sock);
-        listen_sock = -1;
-    }
-
-    freeaddrinfo(result);
-
-    return listen_sock;
 }
 
 static remote_t *
 connect_to_remote(EV_P_ struct addrinfo *res,
                   server_t *server)
 {
+    printf("CONNECT TO REMOTE : SAG1\n");
     int sockfd;
-#ifdef SET_INTERFACE
-    const char *iface = server->listen_ctx->iface;
-#endif
-
-    if (acl) {
-        char ipstr[INET6_ADDRSTRLEN];
-        memset(ipstr, 0, INET6_ADDRSTRLEN);
-
-        if (res->ai_addr->sa_family == AF_INET) {
-            struct sockaddr_in s;
-            memcpy(&s, res->ai_addr, sizeof(struct sockaddr_in));
-            inet_ntop(AF_INET, &s.sin_addr, ipstr, INET_ADDRSTRLEN);
-        } else if (res->ai_addr->sa_family == AF_INET6) {
-            struct sockaddr_in6 s;
-            memcpy(&s, res->ai_addr, sizeof(struct sockaddr_in6));
-            inet_ntop(AF_INET6, &s.sin6_addr, ipstr, INET6_ADDRSTRLEN);
-        }
-
-        if (outbound_block_match_host(ipstr) == 1) {
-            if (verbose)
-                LOGI("outbound blocked %s", ipstr);
-            return NULL;
-        }
-    }
 
     // initialize remote socks
     sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
@@ -541,113 +185,11 @@ connect_to_remote(EV_P_ struct addrinfo *res,
         }
     }
 
-#ifdef SET_INTERFACE
-    if (iface) {
-        if (setinterface(sockfd, iface) == -1) {
-            ERROR("setinterface");
-            close(sockfd);
-            return NULL;
-        }
-    }
-#endif
-
     remote_t *remote = new_remote(sockfd);
 
-    if (fast_open) {
-#if defined(MSG_FASTOPEN) && !defined(TCP_FASTOPEN_CONNECT)
-        int s = -1;
-        s = sendto(sockfd, server->buf->data + server->buf->idx, server->buf->len,
-                   MSG_FASTOPEN, res->ai_addr, res->ai_addrlen);
-#elif defined(TCP_FASTOPEN_WINSOCK)
-        DWORD s   = -1;
-        DWORD err = 0;
-        do {
-            int optval = 1;
-            // Set fast open option
-            if (setsockopt(sockfd, IPPROTO_TCP, TCP_FASTOPEN,
-                           &optval, sizeof(optval)) != 0) {
-                ERROR("setsockopt");
-                break;
-            }
-            // Load ConnectEx function
-            LPFN_CONNECTEX ConnectEx = winsock_getconnectex();
-            if (ConnectEx == NULL) {
-                LOGE("Cannot load ConnectEx() function");
-                err = WSAENOPROTOOPT;
-                break;
-            }
-            // ConnectEx requires a bound socket
-            if (winsock_dummybind(sockfd, res->ai_addr) != 0) {
-                ERROR("bind");
-                break;
-            }
-            // Call ConnectEx to send data
-            memset(&remote->olap, 0, sizeof(remote->olap));
-            remote->connect_ex_done = 0;
-            if (ConnectEx(sockfd, res->ai_addr, res->ai_addrlen,
-                          server->buf->data + server->buf->idx,
-                          server->buf->len, &s, &remote->olap)) {
-                remote->connect_ex_done = 1;
-                break;
-            }
-            // XXX: ConnectEx pending, check later in remote_send
-            if (WSAGetLastError() == ERROR_IO_PENDING) {
-                err = CONNECT_IN_PROGRESS;
-                break;
-            }
-            ERROR("ConnectEx");
-        } while (0);
-        // Set error number
-        if (err) {
-            SetLastError(err);
-        }
-#else
-        int s = -1;
-#if defined(TCP_FASTOPEN_CONNECT)
-        int optval = 1;
-        if (setsockopt(sockfd, IPPROTO_TCP, TCP_FASTOPEN_CONNECT,
-                       (void *)&optval, sizeof(optval)) < 0)
-            FATAL("failed to set TCP_FASTOPEN_CONNECT");
-        s = connect(sockfd, res->ai_addr, res->ai_addrlen);
-#elif defined(CONNECT_DATA_IDEMPOTENT)
-        struct sockaddr_in sa;
-        memcpy(&sa, res->ai_addr, sizeof(struct sockaddr_in));
-        sa.sin_len = sizeof(struct sockaddr_in);
-        sa_endpoints_t endpoints;
-        memset((char *)&endpoints, 0, sizeof(endpoints));
-        endpoints.sae_dstaddr    = (struct sockaddr *)&sa;
-        endpoints.sae_dstaddrlen = res->ai_addrlen;
+	int r = connect(sockfd, res->ai_addr, res->ai_addrlen);
 
-        s = connectx(sockfd, &endpoints, SAE_ASSOCID_ANY, CONNECT_DATA_IDEMPOTENT,
-                     NULL, 0, NULL, NULL);
-#else
-        FATAL("fast open is not enabled in this build");
-#endif
-        if (s == 0)
-            s = send(sockfd, server->buf->data + server->buf->idx, server->buf->len, 0);
-#endif
-        if (s == -1) {
-            if (errno == CONNECT_IN_PROGRESS) {
-                // The remote server doesn't support tfo or it's the first connection to the server.
-                // It will automatically fall back to conventional TCP.
-            } else if (errno == EOPNOTSUPP || errno == EPROTONOSUPPORT ||
-                       errno == ENOPROTOOPT) {
-                // Disable fast open as it's not supported
-                fast_open = 0;
-                LOGE("fast open is not supported on this platform");
-            } else {
-                ERROR("fast_open_connect");
-            }
-        } else {
-            server->buf->idx += s;
-            server->buf->len -= s;
-        }
-    }
-
-    if (!fast_open) {
-        int r = connect(sockfd, res->ai_addr, res->ai_addrlen);
-
-        if (r == -1 && errno != CONNECT_IN_PROGRESS) {
+	if (r == -1 && errno != CONNECT_IN_PROGRESS) {
             ERROR("connect");
             close_and_free_remote(EV_A_ remote);
             return NULL;
