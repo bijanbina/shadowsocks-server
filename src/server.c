@@ -191,104 +191,33 @@ connect_to_remote(EV_P_ struct addrinfo *res,
 
 	if (r == -1 && errno != CONNECT_IN_PROGRESS) {
             ERROR("connect");
-            close_and_free_remote(EV_A_ remote);
-            return NULL;
-        }
-    }
+		close_and_free_remote(EV_A_ remote);
+		return NULL;
+	}
+    printf("CONNECT TO REMOTE : SAG2 %d\n", r);
 
     return remote;
 }
 
-#ifdef USE_NFCONNTRACK_TOS
-int
-setMarkDscpCallback(enum nf_conntrack_msg_type type, struct nf_conntrack *ct, void *data)
+void sagchopkon(char *data, int len, const char *message)
 {
-    server_t *server            = (server_t *)data;
-    struct dscptracker *tracker = server->tracker;
+    char mybuf[10000];
 
-    tracker->mark = nfct_get_attr_u32(ct, ATTR_MARK);
-    if ((tracker->mark & 0xff00) == MARK_MASK_PREFIX) {
-        // Extract DSCP value from mark value
-        tracker->dscp = tracker->mark & 0x00ff;
-        int tos = (tracker->dscp) << 2;
-        if (setsockopt(server->fd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)) != 0) {
-            ERROR("iptable setsockopt IP_TOS");
+    mybuf[0] = 0;
+
+    for(int i=0; i<len; i++)
+    {
+        if(data[i]>=32 && data[i]<=126)
+        {
+            sprintf(mybuf, "%s%c", mybuf, data[i]);
+        }
+        else
+        {
+            sprintf(mybuf, "%s*", mybuf);
         }
     }
-    return NFCT_CB_CONTINUE;
+    printf("%s %d : %s\n", message, len, mybuf);
 }
-
-void
-conntrackQuery(server_t *server)
-{
-    struct dscptracker *tracker = server->tracker;
-    if (tracker && tracker->ct) {
-        // Trying query mark from nf conntrack
-        struct nfct_handle *h = nfct_open(CONNTRACK, 0);
-        if (h) {
-            nfct_callback_register(h, NFCT_T_ALL, setMarkDscpCallback, (void *)server);
-            int x = nfct_query(h, NFCT_Q_GET, tracker->ct);
-            if (x == -1) {
-                LOGE("QOS: Failed to retrieve connection mark %s", strerror(errno));
-            }
-            nfct_close(h);
-        } else {
-            LOGE("QOS: Failed to open conntrack handle for upstream netfilter mark retrieval.");
-        }
-    }
-}
-
-void
-setTosFromConnmark(remote_t *remote, server_t *server)
-{
-    if (server->tracker && server->tracker->ct) {
-        if (server->tracker->mark == 0 && server->tracker->packet_count < MARK_MAX_PACKET) {
-            server->tracker->packet_count++;
-            conntrackQuery(server);
-        }
-    } else {
-        socklen_t len;
-        struct sockaddr_storage sin;
-        len = sizeof(sin);
-        if (getpeername(remote->fd, (struct sockaddr *)&sin, &len) == 0) {
-            struct sockaddr_storage from_addr;
-            len = sizeof from_addr;
-            if (getsockname(remote->fd, (struct sockaddr *)&from_addr, &len) == 0) {
-                if ((server->tracker = (struct dscptracker *)ss_malloc(sizeof(struct dscptracker)))) {
-                    if ((server->tracker->ct = nfct_new())) {
-                        // Build conntrack query SELECT
-                        if (from_addr.ss_family == AF_INET) {
-                            struct sockaddr_in *src = (struct sockaddr_in *)&from_addr;
-                            struct sockaddr_in *dst = (struct sockaddr_in *)&sin;
-
-                            nfct_set_attr_u8(server->tracker->ct, ATTR_L3PROTO, AF_INET);
-                            nfct_set_attr_u32(server->tracker->ct, ATTR_IPV4_DST, dst->sin_addr.s_addr);
-                            nfct_set_attr_u32(server->tracker->ct, ATTR_IPV4_SRC, src->sin_addr.s_addr);
-                            nfct_set_attr_u16(server->tracker->ct, ATTR_PORT_DST, dst->sin_port);
-                            nfct_set_attr_u16(server->tracker->ct, ATTR_PORT_SRC, src->sin_port);
-                        } else if (from_addr.ss_family == AF_INET6) {
-                            struct sockaddr_in6 *src = (struct sockaddr_in6 *)&from_addr;
-                            struct sockaddr_in6 *dst = (struct sockaddr_in6 *)&sin;
-
-                            nfct_set_attr_u8(server->tracker->ct, ATTR_L3PROTO, AF_INET6);
-                            nfct_set_attr(server->tracker->ct, ATTR_IPV6_DST, dst->sin6_addr.s6_addr);
-                            nfct_set_attr(server->tracker->ct, ATTR_IPV6_SRC, src->sin6_addr.s6_addr);
-                            nfct_set_attr_u16(server->tracker->ct, ATTR_PORT_DST, dst->sin6_port);
-                            nfct_set_attr_u16(server->tracker->ct, ATTR_PORT_SRC, src->sin6_port);
-                        }
-                        nfct_set_attr_u8(server->tracker->ct, ATTR_L4PROTO, IPPROTO_TCP);
-                        conntrackQuery(server);
-                    } else {
-                        LOGE("Failed to allocate new conntrack for upstream netfilter mark retrieval.");
-                        server->tracker->ct = NULL;
-                    }
-                }
-            }
-        }
-    }
-}
-
-#endif
 
 static void
 server_recv_cb(EV_P_ ev_io *w, int revents)
@@ -296,10 +225,12 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
     server_ctx_t *server_recv_ctx = (server_ctx_t *)w;
     server_t *server              = server_recv_ctx->server;
     remote_t *remote              = NULL;
+    printf("server_recv_cb, STAGE:%d\n" , server->stage);
 
     buffer_t *buf = server->buf;
 
-    if (server->stage == STAGE_STREAM) {
+    if (server->stage == STAGE_STREAM)
+    {
         remote = server->remote;
         buf    = remote->buf;
 
@@ -309,17 +240,26 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
 
     ssize_t r = recv(server->fd, buf->data, SOCKET_BUF_SIZE, 0);
 
-    if (r == 0) {
+    if (r == 0)
+    {
         // connection closed
+		printf("Error : Connection is closed \n");
         close_and_free_remote(EV_A_ remote);
         close_and_free_server(EV_A_ server);
         return;
-    } else if (r == -1) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+    }
+    else if (r == -1)
+    {
+		printf("Error : Connection is failed \n");
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+        {
             // no data
+            printf("CONTINUE TO RECV\n");
             // continue to wait for recv
             return;
-        } else {
+        }
+        else
+        {
             ERROR("server recv");
             close_and_free_remote(EV_A_ remote);
             close_and_free_server(EV_A_ server);
@@ -327,8 +267,12 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         }
     }
 
+	printf("(server RECV) rx_size: %zu\n", r);
+    sagchopkon(buf->data, r, "RECV: ");
+
     // Ignore any new packet if the server is stopped
-    if (server->stage == STAGE_STOP) {
+    if (server->stage == STAGE_STOP)
+    {
         return;
     }
 
@@ -337,39 +281,55 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
 
     int err = crypto->decrypt(buf, server->d_ctx, SOCKET_BUF_SIZE);
 
-    if (err == CRYPTO_ERROR) {
-        report_addr(server->fd, "authentication error");
+    if (err == CRYPTO_ERROR)
+    {
+        printf("CRYPTO ERROR\n");
         stop_server(EV_A_ server);
         return;
-    } else if (err == CRYPTO_NEED_MORE) {
-        if (server->stage != STAGE_STREAM) {
+    }
+    else if (err == CRYPTO_NEED_MORE)
+    {
+        printf("CRYPTO ERROR\n");
+        if (server->stage != STAGE_STREAM)
+        {
             server->frag++;
         }
         return;
     }
 
     // handshake and transmit data
-    if (server->stage == STAGE_STREAM) {
+    if (server->stage == STAGE_STREAM)
+    {
         int s = send(remote->fd, remote->buf->data, remote->buf->len, 0);
-        if (s == -1) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        //sagchopkon(remote->buf->data, remote->buf->len, "SEND STRM:");
+        printf(">>Sendout: %d\n", s);
+        if (s == -1)
+        {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
                 // no data, wait for send
                 remote->buf->idx = 0;
                 ev_io_stop(EV_A_ & server_recv_ctx->io);
                 ev_io_start(EV_A_ & remote->send_ctx->io);
-            } else {
+            }
+            else
+            {
                 ERROR("server_recv_send");
                 close_and_free_remote(EV_A_ remote);
                 close_and_free_server(EV_A_ server);
             }
-        } else if (s < remote->buf->len) {
+        }
+        else if (s < remote->buf->len)
+        {
             remote->buf->len -= s;
             remote->buf->idx  = s;
             ev_io_stop(EV_A_ & server_recv_ctx->io);
             ev_io_start(EV_A_ & remote->send_ctx->io);
         }
         return;
-    } else if (server->stage == STAGE_INIT) {
+    }
+    else if (server->stage == STAGE_INIT)
+    {
         /*
          * Shadowsocks TCP Relay Header:
          *
