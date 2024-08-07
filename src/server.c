@@ -190,7 +190,7 @@ connect_to_remote(EV_P_ struct addrinfo *res,
 	int r = connect(sockfd, res->ai_addr, res->ai_addrlen);
 
 	if (r == -1 && errno != CONNECT_IN_PROGRESS) {
-            ERROR("connect");
+		ERROR("connect");
 		close_and_free_remote(EV_A_ remote);
 		return NULL;
 	}
@@ -697,17 +697,25 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
 
     ssize_t r = recv(remote->fd, server->buf->data, SOCKET_BUF_SIZE, 0);
 
-    if (r == 0) {
+    printf("(remote RECV) : %zu, %d\n", r, server->stage);
+
+    if (r == 0)
+    {
         // connection closed
         close_and_free_remote(EV_A_ remote);
         close_and_free_server(EV_A_ server);
         return;
-    } else if (r == -1) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+    }
+    else if (r == -1)
+    {
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+        {
             // no data
             // continue to wait for recv
             return;
-        } else {
+        }
+        else
+        {
             ERROR("remote recv");
             close_and_free_remote(EV_A_ remote);
             close_and_free_server(EV_A_ server);
@@ -718,46 +726,55 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
     rx += r;
 
     // Ignore any new packet if the server is stopped
-    if (server->stage == STAGE_STOP) {
+    if (server->stage == STAGE_STOP)
+    {
         return;
     }
 
     server->buf->len = r;
     int err = crypto->encrypt(server->buf, server->e_ctx, SOCKET_BUF_SIZE);
 
-    if (err) {
+    if (err)
+    {
         LOGE("invalid password or cipher");
         close_and_free_remote(EV_A_ remote);
         close_and_free_server(EV_A_ server);
         return;
     }
 
-#ifdef USE_NFCONNTRACK_TOS
-    setTosFromConnmark(remote, server);
-#endif
     int s = send(server->fd, server->buf->data, server->buf->len, 0);
 
-    if (s == -1) {
+    printf("(server SEND) : %d, %zu\n", s, server->buf->len);
+
+    if (s == -1)
+	{
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // no data, wait for send
             server->buf->idx = 0;
             ev_io_stop(EV_A_ & remote_recv_ctx->io);
             ev_io_start(EV_A_ & server->send_ctx->io);
-        } else {
+        }
+        else
+        {
             ERROR("remote_recv_send");
             close_and_free_remote(EV_A_ remote);
             close_and_free_server(EV_A_ server);
             return;
         }
-    } else if (s < server->buf->len) {
+    }
+    else if (s < server->buf->len)
+    {
         server->buf->len -= s;
         server->buf->idx  = s;
         ev_io_stop(EV_A_ & remote_recv_ctx->io);
         ev_io_start(EV_A_ & server->send_ctx->io);
+        printf("S < LEN!\n");
     }
 
     // Disable TCP_NODELAY after the first response are sent
-    if (!remote->recv_ctx->connected && !no_delay) {
+    if (!remote->recv_ctx->connected && !no_delay)
+    {
+        printf("DIS-CONNECTED! HURAY!\n");
         int opt = 0;
         setsockopt(server->fd, SOL_TCP, TCP_NODELAY, &opt, sizeof(opt));
         setsockopt(remote->fd, SOL_TCP, TCP_NODELAY, &opt, sizeof(opt));
@@ -768,65 +785,44 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
 static void
 remote_send_cb(EV_P_ ev_io *w, int revents)
 {
+    printf("remote_send_cb\n");
     remote_ctx_t *remote_send_ctx = (remote_ctx_t *)w;
     remote_t *remote              = remote_send_ctx->remote;
     server_t *server              = remote->server;
 
-    if (server == NULL) {
+    if (server == NULL) 
+	{
         LOGE("invalid server");
         close_and_free_remote(EV_A_ remote);
         return;
     }
 
-    if (!remote_send_ctx->connected) {
-#ifdef TCP_FASTOPEN_WINSOCK
-        if (fast_open) {
-            // Check if ConnectEx is done
-            if (!remote->connect_ex_done) {
-                DWORD numBytes;
-                DWORD flags;
-                // Non-blocking way to fetch ConnectEx result
-                if (WSAGetOverlappedResult(remote->fd, &remote->olap,
-                                           &numBytes, FALSE, &flags)) {
-                    remote->buf->len       -= numBytes;
-                    remote->buf->idx        = numBytes;
-                    remote->connect_ex_done = 1;
-                } else if (WSAGetLastError() == WSA_IO_INCOMPLETE) {
-                    // XXX: ConnectEx still not connected, wait for next time
-                    return;
-                } else {
-                    ERROR("WSAGetOverlappedResult");
-                    // not connected
-                    close_and_free_remote(EV_A_ remote);
-                    close_and_free_server(EV_A_ server);
-                    return;
-                }
-            }
-
-            // Make getpeername work
-            if (setsockopt(remote->fd, SOL_SOCKET,
-                           SO_UPDATE_CONNECT_CONTEXT, NULL, 0) != 0) {
-                ERROR("setsockopt");
-            }
-        }
-#endif
+    if (!remote_send_ctx->connected)
+    {
         struct sockaddr_storage addr;
         socklen_t len = sizeof(struct sockaddr_storage);
         memset(&addr, 0, len);
 
         int r = getpeername(remote->fd, (struct sockaddr *)&addr, &len);
 
-        if (r == 0) {
+        printf("1st if, r:%d, len:%zu\n", r, remote->buf->len);
+
+        if (r == 0)
+        {
             remote_send_ctx->connected = 1;
 
-            if (remote->buf->len == 0) {
+            if (remote->buf->len == 0)
+            {
+        		printf("remote connected\n");
                 server->stage = STAGE_STREAM;
                 ev_io_stop(EV_A_ & remote_send_ctx->io);
                 ev_io_start(EV_A_ & server->recv_ctx->io);
                 ev_io_start(EV_A_ & remote->recv_ctx->io);
                 return;
             }
-        } else {
+        }
+        else
+        {
             ERROR("getpeername");
             // not connected
             close_and_free_remote(EV_A_ remote);
@@ -835,40 +831,56 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
         }
     }
 
-    if (remote->buf->len == 0) {
+    if (remote->buf->len == 0)
+    {
         // close and free
         close_and_free_remote(EV_A_ remote);
         close_and_free_server(EV_A_ server);
         return;
-    } else {
+    }
+    else
+    {
         // has data to send
         ssize_t s = send(remote->fd, remote->buf->data + remote->buf->idx,
                          remote->buf->len, 0);
-        if (s == -1) {
-            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+        printf("(send1471) : %zu\n", s);
+        if (s == -1)
+        {
+            if (errno != EAGAIN && errno != EWOULDBLOCK)
+            {
                 ERROR("remote_send_send");
                 // close and free
                 close_and_free_remote(EV_A_ remote);
                 close_and_free_server(EV_A_ server);
             }
             return;
-        } else if (s < remote->buf->len) {
+        }
+        else if (s < remote->buf->len)
+        {
+            printf("RIDEEEE\n");
             // partly sent, move memory, wait for the next time to send
             remote->buf->len -= s;
             remote->buf->idx += s;
             return;
-        } else {
+        }
+        else
+        {
             // all sent out, wait for reading
             remote->buf->len = 0;
             remote->buf->idx = 0;
             ev_io_stop(EV_A_ & remote_send_ctx->io);
-            if (server != NULL) {
+            if (server != NULL)
+            {
                 ev_io_start(EV_A_ & server->recv_ctx->io);
-                if (server->stage != STAGE_STREAM) {
+                if (server->stage != STAGE_STREAM)
+                {
+                    printf("*******************************\n");
                     server->stage = STAGE_STREAM;
                     ev_io_start(EV_A_ & remote->recv_ctx->io);
                 }
-            } else {
+            }
+            else
+            {
                 LOGE("invalid server");
                 close_and_free_remote(EV_A_ remote);
                 close_and_free_server(EV_A_ server);
@@ -881,10 +893,8 @@ remote_send_cb(EV_P_ ev_io *w, int revents)
 static remote_t *
 new_remote(int fd)
 {
-    if (verbose) {
-        remote_conn++;
-        LOGI("new connection to remote, %d opened remote connections", remote_conn);
-    }
+    remote_conn++;
+    printf("new_remote-%d\n", remote_conn);
 
     remote_t *remote = ss_malloc(sizeof(remote_t));
     memset(remote, 0, sizeof(remote_t));
@@ -911,6 +921,7 @@ new_remote(int fd)
 static void
 free_remote(remote_t *remote)
 {
+    printf("free_remote\n");
     if (remote->server != NULL) {
         remote->server->remote = NULL;
     }
@@ -941,10 +952,8 @@ close_and_free_remote(EV_P_ remote_t *remote)
 static server_t *
 new_server(int fd, listen_ctx_t *listener)
 {
-    if (verbose) {
-        server_conn++;
-        LOGI("new connection from client, %d opened client connections", server_conn);
-    }
+    server_conn++;
+    printf("new connection from client, %d\n", server_conn);
 
     server_t *server;
     server = ss_malloc(sizeof(server_t));
@@ -987,17 +996,7 @@ new_server(int fd, listen_ctx_t *listener)
 static void
 free_server(server_t *server)
 {
-#ifdef USE_NFCONNTRACK_TOS
-    if (server->tracker) {
-        struct dscptracker *tracker = server->tracker;
-        struct nf_conntrack *ct     = server->tracker->ct;
-        server->tracker = NULL;
-        if (ct) {
-            nfct_destroy(ct);
-        }
-        free(tracker);
-    }
-#endif
+    printf("free_server\n");
     cork_dllist_remove(&server->entries);
 
     if (server->remote != NULL) {
@@ -1044,73 +1043,34 @@ close_and_free_server(EV_P_ server_t *server)
 static void
 signal_cb(EV_P_ ev_signal *w, int revents)
 {
+    printf("signal_cb, %d", w->signum);
     if (revents & EV_SIGNAL) {
         switch (w->signum) {
 #ifndef __MINGW32__
         case SIGCHLD:
-            if (!is_plugin_running()) {
-                LOGE("plugin service exit unexpectedly");
-                ret_val = -1;
-            } else
-                return;
+            return;
 #endif
         case SIGINT:
         case SIGTERM:
             ev_signal_stop(EV_DEFAULT, &sigint_watcher);
             ev_signal_stop(EV_DEFAULT, &sigterm_watcher);
-#ifndef __MINGW32__
             ev_signal_stop(EV_DEFAULT, &sigchld_watcher);
-#else
-            ev_io_stop(EV_DEFAULT, &plugin_watcher.io);
-#endif
             ev_unloop(EV_A_ EVUNLOOP_ALL);
         }
     }
 }
 
-#ifdef __MINGW32__
-static void
-plugin_watcher_cb(EV_P_ ev_io *w, int revents)
-{
-    char buf[1];
-    SOCKET fd = accept(plugin_watcher.fd, NULL, NULL);
-    if (fd == INVALID_SOCKET) {
-        return;
-    }
-    recv(fd, buf, 1, 0);
-    closesocket(fd);
-    LOGE("plugin service exit unexpectedly");
-    ret_val = -1;
-    ev_signal_stop(EV_DEFAULT, &sigint_watcher);
-    ev_signal_stop(EV_DEFAULT, &sigterm_watcher);
-    ev_io_stop(EV_DEFAULT, &plugin_watcher.io);
-    ev_unloop(EV_A_ EVUNLOOP_ALL);
-}
-
-#endif
-
 static void
 accept_cb(EV_P_ ev_io *w, int revents)
 {
+    printf("ACCEPT CB\n");
+
     listen_ctx_t *listener = (listen_ctx_t *)w;
     int serverfd           = accept(listener->fd, NULL, NULL);
     if (serverfd == -1) {
         ERROR("accept");
         return;
     }
-
-    char *peer_name = get_peer_name(serverfd);
-    if (peer_name != NULL) {
-        if (acl) {
-            if ((get_acl_mode() == BLACK_LIST && acl_match_host(peer_name) == 1)
-                || (get_acl_mode() == WHITE_LIST && acl_match_host(peer_name) >= 0)) {
-                LOGE("Access denied from %s", peer_name);
-                close(serverfd);
-                return;
-            }
-        }
-    }
-
     int opt = 1;
     setsockopt(serverfd, SOL_TCP, TCP_NODELAY, &opt, sizeof(opt));
 #ifdef SO_NOSIGPIPE
@@ -1135,7 +1095,6 @@ accept_cb(EV_P_ ev_io *w, int revents)
 int
 main(int argc, char **argv)
 {
-    int i, c;
     int pid_flags   = 0;
     int mptcp       = 0;
     int mtu         = 0;
@@ -1342,73 +1301,57 @@ main(int argc, char **argv)
         if (key == NULL) {
             key = conf->key;
         }
-        if (method == NULL) {
-            method = conf->method;
-        }
-        if (timeout == NULL) {
-            timeout = conf->timeout;
-        }
-        if (user == NULL) {
-            user = conf->user;
-        }
-        if (plugin == NULL) {
-            plugin = conf->plugin;
-        }
-        if (plugin_opts == NULL) {
-            plugin_opts = conf->plugin_opts;
-        }
-        if (mode == TCP_ONLY) {
-            mode = conf->mode;
-        }
-        if (mtu == 0) {
-            mtu = conf->mtu;
-        }
-        if (mptcp == 0) {
-            mptcp = conf->mptcp;
-        }
-        if (no_delay == 0) {
-            no_delay = conf->no_delay;
-        }
-        if (reuse_port == 0) {
-            reuse_port = conf->reuse_port;
-        }
-        if (tcp_incoming_sndbuf == 0) {
-            tcp_incoming_sndbuf = conf->tcp_incoming_sndbuf;
-        }
-        if (tcp_incoming_rcvbuf == 0) {
-            tcp_incoming_rcvbuf = conf->tcp_incoming_rcvbuf;
-        }
-        if (tcp_outgoing_sndbuf == 0) {
-            tcp_outgoing_sndbuf = conf->tcp_outgoing_sndbuf;
-        }
-        if (tcp_outgoing_rcvbuf == 0) {
-            tcp_outgoing_rcvbuf = conf->tcp_outgoing_rcvbuf;
-        }
-        if (fast_open == 0) {
-            fast_open = conf->fast_open;
-        }
-        if (is_bind_local_addr == 0) {
-            is_bind_local_addr += parse_local_addr(&local_addr_v4, &local_addr_v6, conf->local_addr);
-        }
-        if (is_bind_local_addr == 0) {
-            is_bind_local_addr += parse_local_addr(&local_addr_v4, &local_addr_v6, conf->local_addr_v4);
-            is_bind_local_addr += parse_local_addr(&local_addr_v4, &local_addr_v6, conf->local_addr_v6);
-        }
-#ifdef HAVE_SETRLIMIT
-        if (nofile == 0) {
-            nofile = conf->nofile;
-        }
-#endif
-        if (nameservers == NULL) {
-            nameservers = conf->nameserver;
-        }
-        if (ipv6first == 0) {
-            ipv6first = conf->ipv6_first;
-        }
-        if (acl == 0 && conf->acl != NULL) {
-            LOGI("initializing acl...");
-            acl = !init_acl(conf->acl);
-        }
+    if (method == NULL) {
+        method = conf->method;
+    }
+    if (timeout == NULL) {
+        timeout = conf->timeout;
+    }
+    if (user == NULL) {
+        user = conf->user;
+    }
+    if (mode == TCP_ONLY) {
+        mode = conf->mode;
+    }
+    if (mtu == 0) {
+        mtu = conf->mtu;
+    }
+    if (mptcp == 0) {
+        mptcp = conf->mptcp;
+    }
+    if (no_delay == 0) {
+        no_delay = conf->no_delay;
+    }
+    if (reuse_port == 0) {
+        reuse_port = conf->reuse_port;
+    }
+    if (tcp_incoming_sndbuf == 0) {
+        tcp_incoming_sndbuf = conf->tcp_incoming_sndbuf;
+    }
+    if (tcp_incoming_rcvbuf == 0) {
+        tcp_incoming_rcvbuf = conf->tcp_incoming_rcvbuf;
+    }
+    if (tcp_outgoing_sndbuf == 0) {
+        tcp_outgoing_sndbuf = conf->tcp_outgoing_sndbuf;
+    }
+    if (tcp_outgoing_rcvbuf == 0) {
+        tcp_outgoing_rcvbuf = conf->tcp_outgoing_rcvbuf;
+    }
+    if (fast_open == 0) {
+        fast_open = conf->fast_open;
+    }
+    if (is_bind_local_addr == 0) {
+        is_bind_local_addr += parse_local_addr(&local_addr_v4, &local_addr_v6, conf->local_addr);
+    }
+    if (is_bind_local_addr == 0) {
+        is_bind_local_addr += parse_local_addr(&local_addr_v4, &local_addr_v6, conf->local_addr_v4);
+        is_bind_local_addr += parse_local_addr(&local_addr_v4, &local_addr_v6, conf->local_addr_v6);
+    }
+    if (nameservers == NULL) {
+        nameservers = conf->nameserver;
+    }
+    if (ipv6first == 0) {
+        ipv6first = conf->ipv6_first;
     }
 
     if (tcp_incoming_sndbuf != 0 && tcp_incoming_sndbuf < SOCKET_BUF_SIZE) {
@@ -1453,35 +1396,7 @@ main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
-    if (is_ipv6only(server_addr, server_num, ipv6first)) {
-        plugin_host = "::1";
-    } else {
-        plugin_host = "127.0.0.1";
-    }
-
     remote_port = server_port;
-
-#ifdef __MINGW32__
-    winsock_init();
-#endif
-
-    if (plugin != NULL) {
-        uint16_t port = get_local_port();
-        if (port == 0) {
-            FATAL("failed to find a free port");
-        }
-        snprintf(tmp_port, 8, "%d", port);
-        plugin_port = server_port;
-        server_port = tmp_port;
-
-#ifdef __MINGW32__
-        memset(&plugin_watcher, 0, sizeof(plugin_watcher));
-        plugin_watcher.port = get_local_port();
-        if (plugin_watcher.port == 0) {
-            LOGE("failed to assign a control port for plugin");
-        }
-#endif
-    }
 
     if (method == NULL) {
         method = "chacha20-ietf-poly1305";
@@ -1491,19 +1406,6 @@ main(int argc, char **argv)
         timeout = "60";
     }
 
-#ifdef HAVE_SETRLIMIT
-    /*
-     * no need to check the return value here since we will show
-     * the user an error message if setrlimit(2) fails
-     */
-    if (nofile > 1024) {
-        if (verbose) {
-            LOGI("setting NOFILE to %d", nofile);
-        }
-        set_nofile(nofile);
-    }
-#endif
-
     USE_SYSLOG(argv[0], pid_flags);
     if (pid_flags) {
         daemonize(pid_path);
@@ -1511,19 +1413,6 @@ main(int argc, char **argv)
 
     if (ipv6first) {
         LOGI("resolving hostname to IPv6 address first");
-    }
-
-    if (fast_open == 1) {
-#ifdef TCP_FASTOPEN
-        LOGI("using tcp fast open");
-#else
-        LOGE("tcp fast open is not supported by this environment");
-        fast_open = 0;
-#endif
-    }
-
-    if (plugin != NULL) {
-        LOGI("plugin \"%s\" enabled", plugin);
     }
 
     if (mode != TCP_ONLY) {
@@ -1538,20 +1427,16 @@ main(int argc, char **argv)
         LOGI("enable TCP no-delay");
     }
 
-#ifndef __MINGW32__
     // ignore SIGPIPE
     signal(SIGPIPE, SIG_IGN);
     signal(SIGABRT, SIG_IGN);
-#endif
 
     ev_signal_init(&sigint_watcher, signal_cb, SIGINT);
     ev_signal_init(&sigterm_watcher, signal_cb, SIGTERM);
     ev_signal_start(EV_DEFAULT, &sigint_watcher);
     ev_signal_start(EV_DEFAULT, &sigterm_watcher);
-#ifndef __MINGW32__
     ev_signal_init(&sigchld_watcher, signal_cb, SIGCHLD);
     ev_signal_start(EV_DEFAULT, &sigchld_watcher);
-#endif
 
     // setup keys
     LOGI("initializing ciphers... %s", method);
@@ -1568,91 +1453,29 @@ main(int argc, char **argv)
     if (nameservers != NULL)
         LOGI("using nameserver: %s", nameservers);
 
-#ifdef __MINGW32__
-    // Listen on plugin control port
-    if (plugin != NULL && plugin_watcher.port != 0) {
-        SOCKET fd;
-        fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (fd != INVALID_SOCKET) {
-            plugin_watcher.valid = 0;
-            do {
-                struct sockaddr_in addr;
-                memset(&addr, 0, sizeof(addr));
-                addr.sin_family      = AF_INET;
-                addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-                addr.sin_port        = htons(plugin_watcher.port);
-                if (bind(fd, (struct sockaddr *)&addr, sizeof(addr))) {
-                    LOGE("failed to bind plugin control port");
-                    break;
-                }
-                if (listen(fd, 1)) {
-                    LOGE("failed to listen on plugin control port");
-                    break;
-                }
-                plugin_watcher.fd = fd;
-                ev_io_init(&plugin_watcher.io, plugin_watcher_cb, fd, EV_READ);
-                ev_io_start(EV_DEFAULT, &plugin_watcher.io);
-                plugin_watcher.valid = 1;
-            } while (0);
-            if (!plugin_watcher.valid) {
-                closesocket(fd);
-                plugin_watcher.port = 0;
-            }
-        }
-    }
-#endif
-
-    // Start plugin server
-    if (plugin != NULL) {
-        int len          = 0;
-        size_t buf_size  = 256 * server_num;
-        char *server_str = ss_malloc(buf_size);
-
-        snprintf(server_str, buf_size, "%s", server_addr[0].host);
-        len = strlen(server_str);
-        for (int i = 1; i < server_num; i++) {
-            snprintf(server_str + len, buf_size - len, "|%s", server_addr[i].host);
-            len = strlen(server_str);
-        }
-
-        int err = start_plugin(plugin, plugin_opts, server_str,
-                               plugin_port, plugin_host, server_port,
-#ifdef __MINGW32__
-                               plugin_watcher.port,
-#endif
-                               MODE_SERVER);
-        if (err) {
-            ERROR("start_plugin");
-            FATAL("failed to start the plugin");
-        }
-    }
-
     // initialize listen context
     listen_ctx_t listen_ctx_list[server_num];
 
     // bind to each interface
-    if (mode != UDP_ONLY) {
-        int num_listen_ctx = 0;
-        for (int i = 0; i < server_num; i++) {
-            const char *host = server_addr[i].host;
-            const char *port = server_addr[i].port ? server_addr[i].port : server_port;
+    
+	int num_listen_ctx = 0;
+	for (int i = 0; i < server_num; i++) 
+	{
+		const char *host = server_addr[i].host;
+		const char *port = server_addr[i].port ? server_addr[i].port : server_port;
 
-            if (plugin != NULL) {
-                host = plugin_host;
-            }
+		if (host && ss_is_ipv6addr(host))
+			LOGI("tcp server listening at [%s]:%s", host, port);
+		else
+			LOGI("tcp server listening at %s:%s", host ? host : "0.0.0.0", port);
 
-            if (host && ss_is_ipv6addr(host))
-                LOGI("tcp server listening at [%s]:%s", host, port);
-            else
-                LOGI("tcp server listening at %s:%s", host ? host : "0.0.0.0", port);
-
-            // Bind to port
-            int listenfd;
-            listenfd = create_and_bind(host, port, mptcp);
-            if (listenfd == -1) {
-                continue;
-            }
-            if (listen(listenfd, SSMAXCONN) == -1) {
+		// Bind to port
+		int listenfd;
+		listenfd = create_and_bind(host, port, mptcp);
+		if (listenfd == -1) {
+			continue;
+		}
+		if (listen(listenfd, SSMAXCONN) == -1) {
                 ERROR("listen()");
                 continue;
             }
@@ -1660,14 +1483,14 @@ main(int argc, char **argv)
             setnonblocking(listenfd);
             listen_ctx_t *listen_ctx = &listen_ctx_list[i];
 
-            // Setup proxy context
-            listen_ctx->timeout = atoi(timeout);
-            listen_ctx->fd      = listenfd;
-            listen_ctx->iface   = iface;
-            listen_ctx->loop    = loop;
+		// Setup proxy context
+		listen_ctx->timeout = atoi(timeout);
+		listen_ctx->fd      = listenfd;
+		listen_ctx->iface   = iface;
+		listen_ctx->loop    = loop;
 
-            ev_io_init(&listen_ctx->io, accept_cb, listenfd, EV_READ);
-            ev_io_start(loop, &listen_ctx->io);
+		ev_io_init(&listen_ctx->io, accept_cb, listenfd, EV_READ);
+		ev_io_start(loop, &listen_ctx->io);
 
             num_listen_ctx++;
 
