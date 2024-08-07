@@ -131,23 +131,6 @@ static const int supported_stream_ciphers_key_size[STREAM_CIPHER_NUM] = {
     0, 16, 16, 16, 24, 32, 16, 24, 32, 16, 16, 24, 32, 16, 8, 16, 16, 16, 32, 32, 32
 };
 
-static int
-crypto_stream_xor_ic(uint8_t *c, const uint8_t *m, uint64_t mlen,
-                     const uint8_t *n, uint64_t ic, const uint8_t *k,
-                     int method)
-{
-    switch (method) {
-    case SALSA20:
-        return crypto_stream_salsa20_xor_ic(c, m, mlen, n, ic, k);
-    case CHACHA20:
-        return crypto_stream_chacha20_xor_ic(c, m, mlen, n, ic, k);
-    case CHACHA20IETF:
-        return crypto_stream_chacha20_ietf_xor_ic(c, m, mlen, n, (uint32_t)ic, k);
-    }
-    // always return 0
-    return 0;
-}
-
 int
 cipher_nonce_size(const cipher_t *cipher)
 {

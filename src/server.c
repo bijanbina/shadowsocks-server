@@ -352,18 +352,22 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         memset(&storage, 0, sizeof(struct sockaddr_storage));
 
         // get remote addr and port
-        if ((atyp & ADDRTYPE_MASK) == 1) {
+        if ((atyp & ADDRTYPE_MASK) == 1)
+        {
             // IP V4
             struct sockaddr_in *addr = (struct sockaddr_in *)&storage;
             size_t in_addr_len       = sizeof(struct in_addr);
             addr->sin_family = AF_INET;
-            if (server->buf->len >= in_addr_len + 3) {
+            if (server->buf->len >= in_addr_len + 3)
+            {
                 memcpy(&addr->sin_addr, server->buf->data + offset, in_addr_len);
                 inet_ntop(AF_INET, (const void *)(server->buf->data + offset),
                           host, INET_ADDRSTRLEN);
                 offset += in_addr_len;
-            } else {
-                report_addr(server->fd, "invalid length for ipv4 address");
+            }
+            else
+            {
+                LOGI("invalid length for ipv4 address");
                 stop_server(EV_A_ server);
                 return;
             }
@@ -373,28 +377,32 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
             info.ai_protocol = IPPROTO_TCP;
             info.ai_addrlen  = sizeof(struct sockaddr_in);
             info.ai_addr     = (struct sockaddr *)addr;
-        } else if ((atyp & ADDRTYPE_MASK) == 3) {
+        }
+        else if ((atyp & ADDRTYPE_MASK) == 3)
+        {
             // Domain name
             uint8_t name_len = *(uint8_t *)(server->buf->data + offset);
-            if (name_len + 4 <= server->buf->len) {
+            if (name_len + 4 <= server->buf->len)
+            {
                 memcpy(host, server->buf->data + offset + 1, name_len);
                 offset += name_len + 1;
-            } else {
-                report_addr(server->fd, "invalid host name length");
+            }
+            else
+            {
+                LOGI("invalid host name length");
                 stop_server(EV_A_ server);
                 return;
             }
-            if (acl && outbound_block_match_host(host) == 1) {
-                if (verbose)
-                    LOGI("outbound blocked %s", host);
-                close_and_free_server(EV_A_ server);
-                return;
-            }
+            host[name_len] = 0;
+            printf("[domain name] %s\n", host);
             struct cork_ip ip;
-            if (cork_ip_init(&ip, host) != -1) {
+            if (cork_ip_init(&ip, host) != -1)
+            {
+                printf("cork_ip_init-1\n");
                 info.ai_socktype = SOCK_STREAM;
                 info.ai_protocol = IPPROTO_TCP;
-                if (ip.version == 4) {
+                if (ip.version == 4)
+                {
                     struct sockaddr_in *addr = (struct sockaddr_in *)&storage;
                     inet_pton(AF_INET, host, &(addr->sin_addr));
                     memcpy(&addr->sin_port, server->buf->data + offset, sizeof(uint16_t));
@@ -402,7 +410,9 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
                     info.ai_family   = AF_INET;
                     info.ai_addrlen  = sizeof(struct sockaddr_in);
                     info.ai_addr     = (struct sockaddr *)addr;
-                } else if (ip.version == 6) {
+                }
+                else if (ip.version == 6)
+                {
                     struct sockaddr_in6 *addr = (struct sockaddr_in6 *)&storage;
                     inet_pton(AF_INET6, host, &(addr->sin6_addr));
                     memcpy(&addr->sin6_port, server->buf->data + offset, sizeof(uint16_t));
@@ -411,15 +421,20 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
                     info.ai_addrlen   = sizeof(struct sockaddr_in6);
                     info.ai_addr      = (struct sockaddr *)addr;
                 }
-            } else {
-                if (!validate_hostname(host, name_len)) {
-                    report_addr(server->fd, "invalid host name");
+            }
+            else
+            {
+                printf("cork ip failed\n");
+                if (!validate_hostname(host, name_len))
+                {
+                    LOGI("invalid host name");
                     stop_server(EV_A_ server);
                     return;
                 }
                 need_query = 1;
             }
-        } else if ((atyp & ADDRTYPE_MASK) == 4) {
+        }
+		else if ((atyp & ADDRTYPE_MASK) == 4) {
             // IP V6
             struct sockaddr_in6 *addr = (struct sockaddr_in6 *)&storage;
             size_t in6_addr_len       = sizeof(struct in6_addr);
@@ -431,7 +446,6 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
                 offset += in6_addr_len;
             } else {
                 LOGE("invalid header with addr type %d", atyp);
-                report_addr(server->fd, "invalid length for ipv6 address");
                 stop_server(EV_A_ server);
                 return;
             }
@@ -442,9 +456,14 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
             info.ai_addrlen  = sizeof(struct sockaddr_in6);
             info.ai_addr     = (struct sockaddr *)addr;
         }
+        else
+        {
+            printf(">>> invalid address type, %c\n", atyp);
+        }
 
-        if (offset == 1) {
-            report_addr(server->fd, "invalid address type");
+        if (offset == 1)
+        {
+            LOGI("invalid address type");
             stop_server(EV_A_ server);
             return;
         }
@@ -453,8 +472,9 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
 
         offset += 2;
 
-        if (server->buf->len < offset) {
-            report_addr(server->fd, "invalid request length");
+        if (server->buf->len < offset)
+        {
+            LOGI("invalid request length");
             stop_server(EV_A_ server);
             return;
         } else {
@@ -462,26 +482,30 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
             server->buf->idx = offset;
         }
 
-        if (verbose) {
-            if ((atyp & ADDRTYPE_MASK) == 4)
-                LOGI("[%s] connect to [%s]:%d", remote_port, host, ntohs(port));
-            else
-                LOGI("[%s] connect to %s:%d", remote_port, host, ntohs(port));
-        }
+		if ((atyp & ADDRTYPE_MASK) == 4)
+			LOGI("[%s] connect to [%s]:%d", remote_port, host, ntohs(port));
+		else
+			LOGI("[%s] connect to %s:%d", remote_port, host, ntohs(port));
 
-        if (!need_query) {
+
+        if (!need_query)
+        {
             remote_t *remote = connect_to_remote(EV_A_ & info, server);
-
-            if (remote == NULL) {
-                LOGE("connect error");
+            if (remote == NULL)
+            {
+                LOGE("connect error : ??????????????");
                 close_and_free_server(EV_A_ server);
                 return;
-            } else {
+            }
+            else
+            {
                 server->remote = remote;
                 remote->server = server;
 
                 // XXX: should handle buffer carefully
-                if (server->buf->len > 0) {
+                if (server->buf->len > 0)
+                {
+                    printf("LOLO again\n");
                     brealloc(remote->buf, server->buf->len, SOCKET_BUF_SIZE);
                     memcpy(remote->buf->data, server->buf->data + server->buf->idx,
                            server->buf->len);
@@ -495,7 +519,9 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
                 ev_io_stop(EV_A_ & server_recv_ctx->io);
                 ev_io_start(EV_A_ & remote->send_ctx->io);
             }
-        } else {
+        }
+        else
+        {
             ev_io_stop(EV_A_ & server_recv_ctx->io);
 
             query_t *query = ss_malloc(sizeof(query_t));
@@ -517,6 +543,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
 static void
 server_send_cb(EV_P_ ev_io *w, int revents)
 {
+    printf("server_send_cb\n");
     server_ctx_t *server_send_ctx = (server_ctx_t *)w;
     server_t *server              = server_send_ctx->server;
     remote_t *remote              = server->remote;
@@ -655,6 +682,7 @@ resolv_cb(struct sockaddr *addr, void *data)
 static void
 remote_recv_cb(EV_P_ ev_io *w, int revents)
 {
+    printf("remote_recv_cb\n");
     remote_ctx_t *remote_recv_ctx = (remote_ctx_t *)w;
     remote_t *remote              = remote_recv_ctx->remote;
     server_t *server              = remote->server;
