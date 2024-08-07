@@ -1108,10 +1108,6 @@ main(int argc, char **argv)
     char *iface     = NULL;
 
     char *server_port = NULL;
-    char *plugin_opts = NULL;
-    char *plugin_host = NULL;
-    char *plugin_port = NULL;
-    char tmp_port[8];
     char *nameservers = NULL;
 
     int server_num = 0;
@@ -1120,187 +1116,20 @@ main(int argc, char **argv)
     memset(&local_addr_v4, 0, sizeof(struct sockaddr_storage));
     memset(&local_addr_v6, 0, sizeof(struct sockaddr_storage));
 
-    static struct option long_options[] = {
-        { "fast-open",       no_argument,       NULL, GETOPT_VAL_FAST_OPEN   },
-        { "reuse-port",      no_argument,       NULL, GETOPT_VAL_REUSE_PORT  },
-        { "tcp-incoming-sndbuf", required_argument, NULL, GETOPT_VAL_TCP_INCOMING_SNDBUF },
-        { "tcp-incoming-rcvbuf", required_argument, NULL, GETOPT_VAL_TCP_INCOMING_RCVBUF },
-        { "tcp-outgoing-sndbuf", required_argument, NULL, GETOPT_VAL_TCP_OUTGOING_SNDBUF },
-        { "tcp-outgoing-rcvbuf", required_argument, NULL, GETOPT_VAL_TCP_OUTGOING_RCVBUF },
-        { "no-delay",        no_argument,       NULL, GETOPT_VAL_NODELAY     },
-        { "acl",             required_argument, NULL, GETOPT_VAL_ACL         },
-        { "manager-address", required_argument, NULL,
-          GETOPT_VAL_MANAGER_ADDRESS },
-        { "mtu",             required_argument, NULL, GETOPT_VAL_MTU         },
-        { "help",            no_argument,       NULL, GETOPT_VAL_HELP        },
-        { "plugin",          required_argument, NULL, GETOPT_VAL_PLUGIN      },
-        { "plugin-opts",     required_argument, NULL, GETOPT_VAL_PLUGIN_OPTS },
-        { "password",        required_argument, NULL, GETOPT_VAL_PASSWORD    },
-        { "key",             required_argument, NULL, GETOPT_VAL_KEY         },
-#ifdef __linux__
-        { "mptcp",           no_argument,       NULL, GETOPT_VAL_MPTCP       },
-#ifdef USE_NFTABLES
-        { "nftables-sets",   required_argument, NULL, GETOPT_VAL_NFTABLES_SETS },
-#endif
-#endif
-        { NULL,              0,                 NULL, 0                      }
-    };
-
     opterr = 0;
 
     USE_TTY();
 
-    while ((c = getopt_long(argc, argv, "f:s:p:l:k:t:m:b:c:i:d:a:n:huUv6A",
-                            long_options, NULL)) != -1) {
-        switch (c) {
-        case GETOPT_VAL_FAST_OPEN:
-            fast_open = 1;
-            break;
-        case GETOPT_VAL_NODELAY:
-            no_delay = 1;
-            LOGI("enable TCP no-delay");
-            break;
-        case GETOPT_VAL_ACL:
-            LOGI("initializing acl...");
-            acl = !init_acl(optarg);
-            break;
-        case GETOPT_VAL_MANAGER_ADDRESS:
-            manager_addr = optarg;
-            break;
-        case GETOPT_VAL_MTU:
-            mtu = atoi(optarg);
-            LOGI("set MTU to %d", mtu);
-            break;
-        case GETOPT_VAL_PLUGIN:
-            plugin = optarg;
-            break;
-        case GETOPT_VAL_PLUGIN_OPTS:
-            plugin_opts = optarg;
-            break;
-        case GETOPT_VAL_MPTCP:
-            mptcp = get_mptcp(1);
-            if (mptcp)
-                LOGI("enable multipath TCP (%s)", mptcp > 0 ? "out-of-tree" : "upstream");
-            break;
-        case GETOPT_VAL_KEY:
-            key = optarg;
-            break;
-        case GETOPT_VAL_REUSE_PORT:
-            reuse_port = 1;
-            break;
-        case GETOPT_VAL_TCP_INCOMING_SNDBUF:
-            tcp_incoming_sndbuf = atoi(optarg);
-            break;
-        case GETOPT_VAL_TCP_INCOMING_RCVBUF:
-            tcp_incoming_rcvbuf = atoi(optarg);
-            break;
-        case GETOPT_VAL_TCP_OUTGOING_SNDBUF:
-            tcp_outgoing_sndbuf = atoi(optarg);
-            break;
-        case GETOPT_VAL_TCP_OUTGOING_RCVBUF:
-            tcp_outgoing_rcvbuf = atoi(optarg);
-            break;
-#ifdef USE_NFTABLES
-        case GETOPT_VAL_NFTABLES_SETS:
-            nftbl_init(optarg);
-            break;
-#endif
-        case 's':
-            if (server_num < MAX_REMOTE_NUM) {
-                parse_addr(optarg, &server_addr[server_num++]);
-            }
-            break;
-        case 'b':
-            is_bind_local_addr += parse_local_addr(&local_addr_v4, &local_addr_v6, optarg);
-            break;
-        case 'p':
-            server_port = optarg;
-            break;
-        case GETOPT_VAL_PASSWORD:
-        case 'k':
-            password = optarg;
-            break;
-        case 'f':
-            pid_flags = 1;
-            pid_path  = optarg;
-            break;
-        case 't':
-            timeout = optarg;
-            break;
-        case 'm':
-            method = optarg;
-            break;
-        case 'c':
-            conf_path = optarg;
-            break;
-        case 'i':
-            iface = optarg;
-            break;
-        case 'd':
-            nameservers = optarg;
-            break;
-        case 'a':
-            user = optarg;
-            break;
-#ifdef HAVE_SETRLIMIT
-        case 'n':
-            nofile = atoi(optarg);
-            break;
-#endif
-        case 'u':
-            mode = TCP_AND_UDP;
-            break;
-        case 'U':
-            mode = UDP_ONLY;
-            break;
-        case 'v':
-            verbose = 1;
-            break;
-        case GETOPT_VAL_HELP:
-        case 'h':
-            usage();
-            exit(EXIT_SUCCESS);
-        case '6':
-            ipv6first = 1;
-            break;
-        case 'A':
-            FATAL("One time auth has been deprecated. Try AEAD ciphers instead.");
-            break;
-        case '?':
-            // The option character is not recognized.
-            LOGE("Unrecognized option: %s", optarg);
-            opterr = 1;
-            break;
-        }
-    }
+    conf_path = "conf.json";
 
-    if (opterr) {
-        usage();
-        exit(EXIT_FAILURE);
+    jconf_t *conf = read_jconf(conf_path);
+    server_num = 1;
+    server_addr[0] = conf->remote_addr[0];
+    server_port = conf->remote_port;
+    password = conf->password;
+    if (key == NULL) {
+        key = conf->key;
     }
-
-    if (argc == 1) {
-        if (conf_path == NULL) {
-            conf_path = get_default_conf();
-        }
-    }
-
-    if (conf_path != NULL) {
-        jconf_t *conf = read_jconf(conf_path);
-        if (server_num == 0) {
-            server_num = conf->remote_num;
-            for (i = 0; i < server_num; i++)
-                server_addr[i] = conf->remote_addr[i];
-        }
-        if (server_port == NULL) {
-            server_port = conf->remote_port;
-        }
-        if (password == NULL) {
-            password = conf->password;
-        }
-        if (key == NULL) {
-            key = conf->key;
-        }
     if (method == NULL) {
         method = conf->method;
     }
@@ -1476,12 +1305,11 @@ main(int argc, char **argv)
 			continue;
 		}
 		if (listen(listenfd, SSMAXCONN) == -1) {
-                ERROR("listen()");
-                continue;
-            }
-            setfastopen(listenfd);
-            setnonblocking(listenfd);
-            listen_ctx_t *listen_ctx = &listen_ctx_list[i];
+			ERROR("listen()");
+			continue;
+		}
+		setnonblocking(listenfd);
+		listen_ctx_t *listen_ctx = &listen_ctx_list[i];
 
 		// Setup proxy context
 		listen_ctx->timeout = atoi(timeout);
@@ -1492,25 +1320,20 @@ main(int argc, char **argv)
 		ev_io_init(&listen_ctx->io, accept_cb, listenfd, EV_READ);
 		ev_io_start(loop, &listen_ctx->io);
 
-            num_listen_ctx++;
+		num_listen_ctx++;
 
-            if (plugin != NULL)
-                break;
-        }
+	}
 
-        if (num_listen_ctx == 0) {
-            FATAL("failed to listen on any address");
-        }
-    }
+	if (num_listen_ctx == 0) 
+	{
+		FATAL("failed to listen on any address");
+	}
 
     if (mode != TCP_ONLY) {
         int num_listen_ctx = 0;
         for (int i = 0; i < server_num; i++) {
             const char *host = server_addr[i].host;
             const char *port = server_addr[i].port ? server_addr[i].port : server_port;
-            if (plugin != NULL) {
-                port = plugin_port;
-            }
             if (host && ss_is_ipv6addr(host))
                 LOGI("udp server listening at [%s]:%s", host, port);
             else
@@ -1527,14 +1350,6 @@ main(int argc, char **argv)
         }
     }
 
-#ifndef __MINGW32__
-    if (manager_addr != NULL) {
-        ev_timer_init(&stat_update_watcher, stat_update_cb, UPDATE_INTERVAL, UPDATE_INTERVAL);
-        ev_timer_start(EV_DEFAULT, &stat_update_watcher);
-    }
-#endif
-
-#ifndef __MINGW32__
     // setuid
     if (user != NULL && !run_as(user)) {
         FATAL("failed to switch user");
@@ -1543,7 +1358,6 @@ main(int argc, char **argv)
     if (geteuid() == 0) {
         LOGI("running from root user");
     }
-#endif
 
     // Init connections
     cork_dllist_init(&connections);
@@ -1551,19 +1365,7 @@ main(int argc, char **argv)
     // start ev loop
     ev_run(loop, 0);
 
-    if (verbose) {
-        LOGI("closed gracefully");
-    }
-
-#ifndef __MINGW32__
-    if (manager_addr != NULL) {
-        ev_timer_stop(EV_DEFAULT, &stat_update_watcher);
-    }
-#endif
-
-    if (plugin != NULL) {
-        stop_plugin();
-    }
+    LOGI("closed gracefully");
 
     // Clean up
 
@@ -1575,8 +1377,6 @@ main(int argc, char **argv)
             ev_io_stop(loop, &listen_ctx->io);
             close(listen_ctx->fd);
         }
-        if (plugin != NULL)
-            break;
     }
 
     if (mode != UDP_ONLY) {
@@ -1586,14 +1386,6 @@ main(int argc, char **argv)
     if (mode != TCP_ONLY) {
         free_udprelay();
     }
-
-#ifdef __MINGW32__
-    if (plugin_watcher.valid) {
-        closesocket(plugin_watcher.fd);
-    }
-
-    winsock_cleanup();
-#endif
 
     return ret_val;
 }
